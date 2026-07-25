@@ -1,0 +1,65 @@
+# ============================================================
+# STAGING-DATEI — NICHT direkt verwendet.
+# Ziel: als .github/workflows/pi-heartbeat-watchdog.yml in einem
+# NEUEN, dedizierten Repo (z.B. Marcel-ku/pi-watchdog, oeffentlich)
+# anlegen — bewusst NICHT im alten pi-homeserver-configs-Repo,
+# das zum Loeschen vorgesehen ist. Anlegen z.B. ueber
+# "Add file -> Create new file" im GitHub Web-UI.
+#
+# GIST_ID unten ist schon eingetragen (542e1c65239cced4d42e24294e79841e).
+# ============================================================
+name: Pi Heartbeat Watchdog
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check-heartbeat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Heartbeat pruefen und ggf. alarmieren
+        env:
+          NTFY_PUBLIC_TOPIC: ${{ secrets.NTFY_PUBLIC_TOPIC }}
+        run: |
+          set -e
+          GIST_ID="542e1c65239cced4d42e24294e79841e"
+          STATE_FILE=".github/watchdog-state.txt"
+          mkdir -p .github
+          [ -f "$STATE_FILE" ] || echo "ok 0" > "$STATE_FILE"
+          read -r LAST_STATE LAST_ALERT < "$STATE_FILE"
+
+          HEARTBEAT=$(curl -s "https://api.github.com/gists/$GIST_ID" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['files']['heartbeat.txt']['content'])")
+          NOW=$(date -u +%s)
+          AGE=$(( NOW - HEARTBEAT ))
+          echo "Heartbeat-Alter: ${AGE}s (Schwelle: 2100s = 35min)"
+
+          if [ "$AGE" -gt 2100 ]; then
+            # Pi vermutlich offline. Nur alarmieren wenn neu ODER letzter
+            # Alarm >4h her (gleiche Cooldown-Logik wie auf dem Pi selbst).
+            if [ "$LAST_STATE" != "down" ] || [ $(( NOW - LAST_ALERT )) -gt 14400 ]; then
+              curl -s -H "Priority: urgent" -d "Stufe 3 – sofort prüfen" \
+                "https://ntfy.sh/$NTFY_PUBLIC_TOPIC"
+              echo "down $NOW" > "$STATE_FILE"
+            fi
+          else
+            if [ "$LAST_STATE" = "down" ]; then
+              curl -s -d "Pi wieder erreichbar" "https://ntfy.sh/$NTFY_PUBLIC_TOPIC"
+            fi
+            echo "ok $NOW" > "$STATE_FILE"
+          fi
+
+      - name: State committen
+        run: |
+          git config user.name "pi-watchdog-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add .github/watchdog-state.txt
+          git diff --cached --quiet || git commit -m "watchdog state update"
+          git push
